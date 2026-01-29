@@ -156,8 +156,8 @@ A native macOS application that lets you run 1-12 Claude Code (or other AI CLI) 
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/jackwakem/claude-maestro.git
-   cd claude-maestro
+   git clone https://github.com/its-maestro-baby/maestro.git
+   cd maestro
    ```
 
 2. **Open in Xcode:**
