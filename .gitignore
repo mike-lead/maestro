@@ -1,16 +1,46 @@
-# Swift Package Manager
-MaestroMCPServer/.build/
-.swiftpm/
+# Dependencies
+node_modules/
 
-# Xcode user-specific data
-xcuserdata/
-*.xcuserstate
+# Build output
+dist/
 
-# Xcode build directory
-build/
+# Rust build artifacts
+src-tauri/target/
+
+# Generated schemas (rebuilt by tauri build)
+src-tauri/gen/
+
+# Environment
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
 
 # Local Claude session context
 claude.md
 
 # Local MCP configuration (contains machine-specific paths)
 .mcp.json
+
+# Claude Code local config
+.claude/
+
+# Plugins config
+.plugins.json
+
+# Build artifacts
+*.dmg
+*.zip
+*.app
+
+# Notes
+plan.md
+reddit-post.md
