@@ -4,13 +4,18 @@ import {
   ChevronDown,
   ChevronRight,
   Code2,
+  Expand,
   FolderGit2,
+  FolderOpen,
   GitBranch,
+  Loader2,
+  Minimize,
   Package,
   Play,
   Search,
   Server,
   Sparkles,
+  Star,
   Store,
   Terminal,
   X,
@@ -20,34 +25,9 @@ import { useEffect, useRef, useState } from "react";
 
 import type { BranchWithWorktreeStatus } from "@/lib/git";
 import type { McpServerConfig } from "@/lib/mcp";
-import type { PluginConfig, SkillConfig, SkillSource } from "@/lib/plugins";
+import type { PluginConfig, SkillConfig } from "@/lib/plugins";
 import type { AiMode } from "@/stores/useSessionStore";
-
-/** Returns badge styling and text for a skill source. */
-function getSkillSourceLabel(source: SkillSource): { text: string; className: string } {
-  switch (source.type) {
-    case "project":
-      return {
-        text: "Project",
-        className: "bg-maestro-accent/20 text-maestro-accent",
-      };
-    case "personal":
-      return {
-        text: "Personal",
-        className: "bg-maestro-green/20 text-maestro-green",
-      };
-    case "plugin":
-      return {
-        text: source.name,
-        className: "bg-maestro-purple/20 text-maestro-purple",
-      };
-    case "legacy":
-      return {
-        text: "Legacy",
-        className: "bg-maestro-muted/20 text-maestro-muted",
-      };
-  }
-}
+import type { RepositoryInfo, WorkspaceType } from "@/stores/useWorkspaceStore";
 
 /** Pre-launch session slot configuration. */
 export interface SessionSlot {
@@ -73,6 +53,16 @@ interface PreLaunchCardProps {
   branches: BranchWithWorktreeStatus[];
   isLoadingBranches: boolean;
   isGitRepo: boolean;
+  /** List of repositories for multi-repo workspaces. */
+  repositories?: RepositoryInfo[];
+  /** Workspace type - single-repo, multi-repo, or non-git. */
+  workspaceType?: WorkspaceType;
+  /** Currently selected repository path. */
+  selectedRepoPath?: string;
+  /** Callback to change the selected repository. */
+  onRepoChange?: (path: string) => void;
+  /** Function to fetch branches for any repository (for lazy loading). */
+  fetchBranchesForRepo?: (repoPath: string) => Promise<BranchWithWorktreeStatus[]>;
   mcpServers: McpServerConfig[];
   skills: SkillConfig[];
   plugins: PluginConfig[];
@@ -87,6 +77,8 @@ interface PreLaunchCardProps {
   onPluginsUnselectAll: () => void;
   onLaunch: () => void;
   onRemove: () => void;
+  isZoomed?: boolean;
+  onToggleZoom?: () => void;
 }
 
 const AI_MODES: { mode: AiMode; icon: typeof BrainCircuit; label: string; color: string }[] = [
@@ -105,6 +97,11 @@ export function PreLaunchCard({
   branches,
   isLoadingBranches,
   isGitRepo,
+  repositories,
+  workspaceType,
+  selectedRepoPath,
+  onRepoChange,
+  fetchBranchesForRepo,
   mcpServers,
   skills,
   plugins,
@@ -119,6 +116,8 @@ export function PreLaunchCard({
   onPluginsUnselectAll,
   onLaunch,
   onRemove,
+  isZoomed = false,
+  onToggleZoom,
 }: PreLaunchCardProps) {
   const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
   const [branchDropdownOpen, setBranchDropdownOpen] = useState(false);
@@ -128,6 +127,12 @@ export function PreLaunchCard({
   const [mcpSearchQuery, setMcpSearchQuery] = useState("");
   const [pluginsSearchQuery, setPluginsSearchQuery] = useState("");
   const [branchSearchQuery, setBranchSearchQuery] = useState("");
+
+  // Multi-repo state: track expanded repos and cached branches per repo
+  const [expandedRepos, setExpandedRepos] = useState<Set<string>>(new Set());
+  const [repoBranchesCache, setRepoBranchesCache] = useState<Map<string, BranchWithWorktreeStatus[]>>(new Map());
+  const [loadingRepos, setLoadingRepos] = useState<Set<string>>(new Set());
+
   const modeDropdownRef = useRef<HTMLDivElement>(null);
   const branchDropdownRef = useRef<HTMLDivElement>(null);
   const mcpDropdownRef = useRef<HTMLDivElement>(null);
@@ -189,9 +194,6 @@ export function PreLaunchCard({
     }
   }
 
-  // Standalone skills are those not claimed by any plugin
-  const standaloneSkills = skills.filter((s) => !skillsInPlugins.has(s.id));
-
   // Toggle plugin expansion
   const togglePluginExpanded = (pluginId: string) => {
     setExpandedPlugins((prev) => {
@@ -219,7 +221,87 @@ export function PreLaunchCard({
 
   // Separate local and remote branches
   const localBranches = branches.filter((b) => !b.isRemote);
-  const remoteBranches = branches.filter((b) => b.isRemote);
+  // Filter out remote branches that already have a local counterpart
+  // e.g., hide "origin/feature/foo" when "feature/foo" exists locally
+  const localBranchNames = new Set(localBranches.map((b) => b.name));
+  const remoteBranches = branches.filter((b) => {
+    if (!b.isRemote) return false;
+    const slashIndex = b.name.indexOf("/");
+    if (slashIndex === -1) return true;
+    const localName = b.name.substring(slashIndex + 1);
+    return !localBranchNames.has(localName);
+  });
+
+  // Check if this is a multi-repo workspace
+  const isMultiRepo = workspaceType === "multi-repo" && repositories && repositories.length > 0;
+
+  // Get the display name for a repo path (folder name)
+  const getRepoDisplayName = (path: string): string => {
+    const repo = repositories?.find((r) => r.path === path);
+    return repo?.name ?? path.split("/").pop() ?? path;
+  };
+
+  // Toggle repo expansion and fetch branches if needed
+  const toggleRepoExpanded = async (repoPath: string) => {
+    const newExpanded = new Set(expandedRepos);
+
+    if (newExpanded.has(repoPath)) {
+      // Collapsing
+      newExpanded.delete(repoPath);
+      setExpandedRepos(newExpanded);
+    } else {
+      // Expanding - fetch branches if not cached
+      newExpanded.add(repoPath);
+      setExpandedRepos(newExpanded);
+
+      if (!repoBranchesCache.has(repoPath) && fetchBranchesForRepo) {
+        setLoadingRepos((prev) => new Set(prev).add(repoPath));
+        try {
+          const fetchedBranches = await fetchBranchesForRepo(repoPath);
+          setRepoBranchesCache((prev) => new Map(prev).set(repoPath, fetchedBranches));
+        } catch (err) {
+          console.error("Failed to fetch branches for repo:", err);
+        } finally {
+          setLoadingRepos((prev) => {
+            const next = new Set(prev);
+            next.delete(repoPath);
+            return next;
+          });
+        }
+      }
+    }
+  };
+
+  // Handle selecting a repo (use current branch)
+  const handleSelectRepo = (repoPath: string) => {
+    if (onRepoChange) {
+      onRepoChange(repoPath);
+    }
+    onBranchChange(null); // Use current branch
+    setBranchDropdownOpen(false);
+    setBranchSearchQuery("");
+  };
+
+  // Handle selecting a branch under a specific repo
+  const handleSelectRepoBranch = (repoPath: string, branchName: string | null) => {
+    if (onRepoChange && repoPath !== selectedRepoPath) {
+      onRepoChange(repoPath);
+    }
+    onBranchChange(branchName);
+    setBranchDropdownOpen(false);
+    setBranchSearchQuery("");
+  };
+
+  // Populate cache with current branches on mount/when branches change
+  useEffect(() => {
+    if (selectedRepoPath && branches.length > 0) {
+      setRepoBranchesCache((prev) => new Map(prev).set(selectedRepoPath, branches));
+    }
+  }, [selectedRepoPath, branches]);
+
+  // Get the selected repo info for display
+  const selectedRepo = repositories?.find((r) => r.path === selectedRepoPath);
+  const selectedRepoName = selectedRepo?.name ?? getRepoDisplayName(selectedRepoPath ?? "");
 
   return (
     <div className="content-dark terminal-cell flex h-full flex-col items-center justify-center bg-maestro-bg p-4">
@@ -228,15 +310,29 @@ export function PreLaunchCard({
         {/* Header with remove button */}
         <div className="flex items-center justify-between">
           <span className="text-sm font-medium text-maestro-text">Configure Session</span>
-          <button
-            type="button"
-            onClick={onRemove}
-            className="rounded p-1 text-maestro-muted transition-colors hover:bg-maestro-card hover:text-maestro-red"
-            title="Remove session slot"
-            aria-label="Remove session slot"
-          >
-            <X size={14} />
-          </button>
+          <div className="flex items-center gap-1">
+            {/* Zoom toggle button */}
+            {onToggleZoom && (
+              <button
+                type="button"
+                onClick={() => onToggleZoom()}
+                className="rounded p-1 text-maestro-muted transition-colors hover:bg-maestro-card hover:text-maestro-accent"
+                title={isZoomed ? "Restore grid view" : "Zoom terminal"}
+                aria-label={isZoomed ? "Restore grid view" : "Zoom terminal"}
+              >
+                {isZoomed ? <Minimize size={14} /> : <Expand size={14} />}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onRemove}
+              className="rounded p-1 text-maestro-muted transition-colors hover:bg-maestro-card hover:text-maestro-red"
+              title="Remove session slot"
+              aria-label="Remove session slot"
+            >
+              <X size={14} />
+            </button>
+          </div>
         </div>
 
         {/* AI Mode Selector */}
@@ -284,12 +380,12 @@ export function PreLaunchCard({
           )}
         </div>
 
-        {/* Branch Selector */}
+        {/* Repository & Branch Selector */}
         <div className="relative" ref={branchDropdownRef}>
           <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-maestro-muted">
-            Git Branch
+            {isMultiRepo ? "Repository & Branch" : "Git Branch"}
           </label>
-          {!isGitRepo ? (
+          {!isGitRepo && !isMultiRepo ? (
             <div className="flex items-center gap-2 rounded border border-maestro-border bg-maestro-card/50 px-3 py-2 text-sm text-maestro-muted">
               <Terminal size={14} />
               <span>Not a Git repository</span>
@@ -303,8 +399,20 @@ export function PreLaunchCard({
                 className="flex w-full items-center justify-between gap-2 rounded border border-maestro-border bg-maestro-card px-3 py-2 text-left text-sm text-maestro-text transition-colors hover:border-maestro-accent/50 disabled:opacity-50"
               >
                 <div className="flex min-w-0 items-center gap-2">
-                  <GitBranch size={14} className="shrink-0 text-maestro-accent" />
-                  <span className="truncate">{displayBranch}</span>
+                  {isMultiRepo ? (
+                    <>
+                      <FolderOpen size={14} className="shrink-0 text-maestro-purple" />
+                      <span className="truncate">{selectedRepoName}</span>
+                      <span className="text-maestro-muted">/</span>
+                      <GitBranch size={12} className="shrink-0 text-maestro-accent" />
+                      <span className="truncate text-maestro-muted">{displayBranch}</span>
+                    </>
+                  ) : (
+                    <>
+                      <GitBranch size={14} className="shrink-0 text-maestro-accent" />
+                      <span className="truncate">{displayBranch}</span>
+                    </>
+                  )}
                   {selectedBranchInfo?.hasWorktree && (
                     <span title="Worktree exists">
                       <FolderGit2 size={12} className="shrink-0 text-maestro-orange" />
@@ -327,7 +435,7 @@ export function PreLaunchCard({
                       <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-maestro-muted" />
                       <input
                         type="text"
-                        placeholder="Search branches..."
+                        placeholder={isMultiRepo ? "Search repos and branches..." : "Search branches..."}
                         value={branchSearchQuery}
                         onChange={(e) => setBranchSearchQuery(e.target.value)}
                         className="w-full rounded border border-maestro-border bg-maestro-surface py-1.5 pl-7 pr-2 text-xs text-maestro-text placeholder:text-maestro-muted focus:border-maestro-accent focus:outline-none"
@@ -335,117 +443,257 @@ export function PreLaunchCard({
                       />
                     </div>
                   </div>
-                  {/* Branch list */}
-                  <div className="max-h-48 overflow-y-auto">
-                    {/* Current branch option - only show if not searching or if it matches */}
-                    {(!branchSearchQuery || "use current branch".includes(branchSearchQuery.toLowerCase())) && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onBranchChange(null);
-                          setBranchDropdownOpen(false);
-                          setBranchSearchQuery("");
-                        }}
-                        className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                          slot.branch === null
-                            ? "bg-maestro-accent/10 text-maestro-text"
-                            : "text-maestro-muted hover:bg-maestro-surface hover:text-maestro-text"
-                        }`}
-                      >
-                        <GitBranch size={14} />
-                        <span>Use current branch</span>
-                      </button>
-                    )}
 
-                    {/* Local branches */}
-                    {localBranches.filter((b) =>
-                      b.name.toLowerCase().includes(branchSearchQuery.toLowerCase())
-                    ).length > 0 && (
-                      <>
-                        <div className="border-t border-maestro-border px-3 py-1 text-[9px] font-medium uppercase tracking-wide text-maestro-muted">
-                          Local
-                        </div>
-                        {localBranches
-                          .filter((b) => b.name.toLowerCase().includes(branchSearchQuery.toLowerCase()))
-                          .map((branch) => (
-                            <button
-                              key={branch.name}
-                              type="button"
-                              onClick={() => {
-                                onBranchChange(branch.name);
-                                setBranchDropdownOpen(false);
-                                setBranchSearchQuery("");
-                              }}
-                              className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                                slot.branch === branch.name
-                                  ? "bg-maestro-accent/10 text-maestro-text"
-                                  : "text-maestro-muted hover:bg-maestro-surface hover:text-maestro-text"
-                              }`}
-                            >
-                              <GitBranch size={14} />
-                              <span className="truncate">{branch.name}</span>
-                              {branch.hasWorktree && (
-                                <span title="Worktree exists">
-                                  <FolderGit2 size={12} className="shrink-0 text-maestro-orange" />
-                                </span>
-                              )}
-                              {branch.isCurrent && (
-                                <span className="shrink-0 rounded bg-maestro-green/20 px-1 text-[9px] text-maestro-green">
-                                  current
-                                </span>
-                              )}
-                            </button>
-                          ))}
-                      </>
-                    )}
+                  {/* Multi-repo view with expandable repos */}
+                  {isMultiRepo ? (
+                    <div className="max-h-64 overflow-y-auto">
+                      {repositories?.filter((repo) =>
+                        !branchSearchQuery ||
+                        repo.name.toLowerCase().includes(branchSearchQuery.toLowerCase()) ||
+                        repoBranchesCache.get(repo.path)?.some((b) =>
+                          b.name.toLowerCase().includes(branchSearchQuery.toLowerCase())
+                        )
+                      ).map((repo) => {
+                        const isSelected = repo.path === selectedRepoPath;
+                        const isExpanded = expandedRepos.has(repo.path);
+                        const isLoading = loadingRepos.has(repo.path);
+                        const repoBranches = repoBranchesCache.get(repo.path) ?? [];
+                        const repoLocalBranches = repoBranches.filter((b) => !b.isRemote);
+                        const currentRepoBranch = repoBranches.find((b) => b.isCurrent);
 
-                    {/* Remote branches */}
-                    {remoteBranches.filter((b) =>
-                      b.name.toLowerCase().includes(branchSearchQuery.toLowerCase())
-                    ).length > 0 && (
-                      <>
-                        <div className="border-t border-maestro-border px-3 py-1 text-[9px] font-medium uppercase tracking-wide text-maestro-muted">
-                          Remote
-                        </div>
-                        {remoteBranches
-                          .filter((b) => b.name.toLowerCase().includes(branchSearchQuery.toLowerCase()))
-                          .map((branch) => (
-                            <button
-                              key={branch.name}
-                              type="button"
-                              onClick={() => {
-                                onBranchChange(branch.name);
-                                setBranchDropdownOpen(false);
-                                setBranchSearchQuery("");
-                              }}
-                              className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                                slot.branch === branch.name
-                                  ? "bg-maestro-accent/10 text-maestro-text"
-                                  : "text-maestro-muted hover:bg-maestro-surface hover:text-maestro-text"
-                              }`}
-                            >
-                              <GitBranch size={14} className="text-maestro-muted/60" />
-                              <span className="truncate">{branch.name}</span>
-                              {branch.hasWorktree && (
-                                <span title="Worktree exists">
-                                  <FolderGit2 size={12} className="shrink-0 text-maestro-orange" />
-                                </span>
-                              )}
-                            </button>
-                          ))}
-                      </>
-                    )}
+                        // Filter branches by search query
+                        const filteredBranches = branchSearchQuery
+                          ? repoLocalBranches.filter((b) =>
+                              b.name.toLowerCase().includes(branchSearchQuery.toLowerCase())
+                            )
+                          : repoLocalBranches;
 
-                    {/* No results message */}
-                    {branchSearchQuery &&
-                      localBranches.filter((b) => b.name.toLowerCase().includes(branchSearchQuery.toLowerCase())).length === 0 &&
-                      remoteBranches.filter((b) => b.name.toLowerCase().includes(branchSearchQuery.toLowerCase())).length === 0 &&
-                      !"use current branch".includes(branchSearchQuery.toLowerCase()) && (
+                        return (
+                          <div key={repo.path} className={isSelected ? "bg-maestro-accent/5" : ""}>
+                            {/* Repo header row */}
+                            <div className="flex items-center gap-1 px-2 py-1.5 hover:bg-maestro-surface">
+                              {/* Expand/collapse button */}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleRepoExpanded(repo.path);
+                                }}
+                                className="shrink-0 rounded p-0.5 hover:bg-maestro-border/40"
+                              >
+                                {isLoading ? (
+                                  <Loader2 size={12} className="animate-spin text-maestro-muted" />
+                                ) : isExpanded ? (
+                                  <ChevronDown size={12} className="text-maestro-muted" />
+                                ) : (
+                                  <ChevronRight size={12} className="text-maestro-muted" />
+                                )}
+                              </button>
+                              {/* Repo select button */}
+                              <button
+                                type="button"
+                                onClick={() => handleSelectRepo(repo.path)}
+                                className="flex flex-1 items-center gap-2 text-left text-sm"
+                              >
+                                <FolderOpen size={14} className="shrink-0 text-maestro-purple" />
+                                <span className={`flex-1 truncate ${isSelected ? "text-maestro-text font-medium" : "text-maestro-muted"}`}>
+                                  {repo.name}
+                                </span>
+                                {currentRepoBranch && (
+                                  <span className="text-[10px] text-maestro-muted">
+                                    {currentRepoBranch.name}
+                                  </span>
+                                )}
+                                {isSelected && (
+                                  <Check size={12} className="shrink-0 text-maestro-accent" />
+                                )}
+                              </button>
+                            </div>
+
+                            {/* Expanded branches */}
+                            {isExpanded && !isLoading && (
+                              <div className="ml-5 border-l border-maestro-border/40 pl-2">
+                                {/* Use current branch option */}
+                                <button
+                                  type="button"
+                                  onClick={() => handleSelectRepoBranch(repo.path, null)}
+                                  className={`flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs transition-colors hover:bg-maestro-surface ${
+                                    isSelected && slot.branch === null
+                                      ? "bg-maestro-accent/10 text-maestro-text"
+                                      : "text-maestro-muted"
+                                  }`}
+                                >
+                                  <GitBranch size={12} />
+                                  <span>Use current branch</span>
+                                  {currentRepoBranch && (
+                                    <span className="text-[10px] text-maestro-muted/60">
+                                      ({currentRepoBranch.name})
+                                    </span>
+                                  )}
+                                </button>
+
+                                {/* Branch list */}
+                                {filteredBranches.map((branch) => {
+                                  const isBranchSelected = isSelected && slot.branch === branch.name;
+                                  return (
+                                    <button
+                                      key={branch.name}
+                                      type="button"
+                                      onClick={() => handleSelectRepoBranch(repo.path, branch.name)}
+                                      className={`flex w-full items-center gap-2 px-2 py-1 text-left text-xs transition-colors hover:bg-maestro-surface ${
+                                        isBranchSelected
+                                          ? "bg-maestro-accent/10 text-maestro-text"
+                                          : "text-maestro-muted"
+                                      }`}
+                                    >
+                                      <GitBranch size={11} />
+                                      <span className="flex-1 truncate">{branch.name}</span>
+                                      {branch.isCurrent && (
+                                        <Star size={10} className="shrink-0 text-maestro-green" fill="currentColor" />
+                                      )}
+                                      {branch.hasWorktree && (
+                                        <FolderGit2 size={10} className="shrink-0 text-maestro-orange" />
+                                      )}
+                                    </button>
+                                  );
+                                })}
+
+                                {filteredBranches.length === 0 && repoBranches.length > 0 && branchSearchQuery && (
+                                  <div className="px-2 py-1 text-[10px] text-maestro-muted">
+                                    No matching branches
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+
+                      {/* No repos match message */}
+                      {branchSearchQuery && repositories?.filter((repo) =>
+                        repo.name.toLowerCase().includes(branchSearchQuery.toLowerCase()) ||
+                        repoBranchesCache.get(repo.path)?.some((b) =>
+                          b.name.toLowerCase().includes(branchSearchQuery.toLowerCase())
+                        )
+                      ).length === 0 && (
                         <div className="px-3 py-2 text-center text-xs text-maestro-muted">
-                          No branches match "{branchSearchQuery}"
+                          No repos or branches match "{branchSearchQuery}"
                         </div>
                       )}
-                  </div>
+                    </div>
+                  ) : (
+                    /* Single-repo branch list (original behavior) */
+                    <div className="max-h-48 overflow-y-auto">
+                      {/* Current branch option - only show if not searching or if it matches */}
+                      {(!branchSearchQuery || "use current branch".includes(branchSearchQuery.toLowerCase())) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onBranchChange(null);
+                            setBranchDropdownOpen(false);
+                            setBranchSearchQuery("");
+                          }}
+                          className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                            slot.branch === null
+                              ? "bg-maestro-accent/10 text-maestro-text"
+                              : "text-maestro-muted hover:bg-maestro-surface hover:text-maestro-text"
+                          }`}
+                        >
+                          <GitBranch size={14} />
+                          <span>Use current branch</span>
+                        </button>
+                      )}
+
+                      {/* Local branches */}
+                      {localBranches.filter((b) =>
+                        b.name.toLowerCase().includes(branchSearchQuery.toLowerCase())
+                      ).length > 0 && (
+                        <>
+                          <div className="border-t border-maestro-border px-3 py-1 text-[9px] font-medium uppercase tracking-wide text-maestro-muted">
+                            Local
+                          </div>
+                          {localBranches
+                            .filter((b) => b.name.toLowerCase().includes(branchSearchQuery.toLowerCase()))
+                            .map((branch) => (
+                              <button
+                                key={branch.name}
+                                type="button"
+                                onClick={() => {
+                                  onBranchChange(branch.name);
+                                  setBranchDropdownOpen(false);
+                                  setBranchSearchQuery("");
+                                }}
+                                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                                  slot.branch === branch.name
+                                    ? "bg-maestro-accent/10 text-maestro-text"
+                                    : "text-maestro-muted hover:bg-maestro-surface hover:text-maestro-text"
+                                }`}
+                              >
+                                <GitBranch size={14} />
+                                <span className="truncate">{branch.name}</span>
+                                {branch.hasWorktree && (
+                                  <span title="Worktree exists">
+                                    <FolderGit2 size={12} className="shrink-0 text-maestro-orange" />
+                                  </span>
+                                )}
+                                {branch.isCurrent && (
+                                  <span className="shrink-0 rounded bg-maestro-green/20 px-1 text-[9px] text-maestro-green">
+                                    current
+                                  </span>
+                                )}
+                              </button>
+                            ))}
+                        </>
+                      )}
+
+                      {/* Remote branches */}
+                      {remoteBranches.filter((b) =>
+                        b.name.toLowerCase().includes(branchSearchQuery.toLowerCase())
+                      ).length > 0 && (
+                        <>
+                          <div className="border-t border-maestro-border px-3 py-1 text-[9px] font-medium uppercase tracking-wide text-maestro-muted">
+                            Remote
+                          </div>
+                          {remoteBranches
+                            .filter((b) => b.name.toLowerCase().includes(branchSearchQuery.toLowerCase()))
+                            .map((branch) => (
+                              <button
+                                key={branch.name}
+                                type="button"
+                                onClick={() => {
+                                  onBranchChange(branch.name);
+                                  setBranchDropdownOpen(false);
+                                  setBranchSearchQuery("");
+                                }}
+                                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                                  slot.branch === branch.name
+                                    ? "bg-maestro-accent/10 text-maestro-text"
+                                    : "text-maestro-muted hover:bg-maestro-surface hover:text-maestro-text"
+                                }`}
+                              >
+                                <GitBranch size={14} className="text-maestro-muted/60" />
+                                <span className="truncate">{branch.name}</span>
+                                {branch.hasWorktree && (
+                                  <span title="Worktree exists">
+                                    <FolderGit2 size={12} className="shrink-0 text-maestro-orange" />
+                                  </span>
+                                )}
+                              </button>
+                            ))}
+                        </>
+                      )}
+
+                      {/* No results message */}
+                      {branchSearchQuery &&
+                        localBranches.filter((b) => b.name.toLowerCase().includes(branchSearchQuery.toLowerCase())).length === 0 &&
+                        remoteBranches.filter((b) => b.name.toLowerCase().includes(branchSearchQuery.toLowerCase())).length === 0 &&
+                        !"use current branch".includes(branchSearchQuery.toLowerCase()) && (
+                          <div className="px-3 py-2 text-center text-xs text-maestro-muted">
+                            No branches match "{branchSearchQuery}"
+                          </div>
+                        )}
+                    </div>
+                  )}
                 </div>
               )}
             </>
@@ -755,49 +1003,7 @@ export function PreLaunchCard({
                       </>
                     )}
 
-                    {/* Standalone Skills */}
-                    {standaloneSkills.length > 0 && (
-                      <>
-                        <div className="border-b border-t border-maestro-border px-3 py-1.5 text-[9px] font-medium uppercase tracking-wide text-maestro-muted">
-                          Skills ({standaloneSkills.length})
-                        </div>
-                        {standaloneSkills
-                          .filter((skill) =>
-                            !pluginsSearchQuery ||
-                            skill.name.toLowerCase().includes(pluginsSearchQuery.toLowerCase())
-                          )
-                          .map((skill) => {
-                            const isEnabled = slot.enabledSkills.includes(skill.id);
-                            const sourceLabel = getSkillSourceLabel(skill.source);
-                            return (
-                              <button
-                                key={skill.id}
-                                type="button"
-                                onClick={() => onSkillToggle(skill.id)}
-                                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm transition-colors hover:bg-maestro-surface"
-                                title={skill.description || undefined}
-                              >
-                                <span
-                                  className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
-                                    isEnabled
-                                      ? "border-maestro-orange bg-maestro-orange"
-                                      : "border-maestro-border bg-transparent"
-                                  }`}
-                                >
-                                  {isEnabled && <Check size={12} className="text-white" />}
-                                </span>
-                                <Zap size={12} className="shrink-0 text-maestro-orange" />
-                                <span className={`flex-1 truncate ${isEnabled ? "text-maestro-text" : "text-maestro-muted"}`}>
-                                  {skill.name}
-                                </span>
-                                <span className={`shrink-0 rounded px-1 text-[9px] ${sourceLabel.className}`}>
-                                  {sourceLabel.text}
-                                </span>
-                              </button>
-                            );
-                          })}
-                      </>
-                    )}
+                    {/* Standalone Skills - hidden from toggles since Claude CLI cannot disable them per-session */}
 
                     {/* No results message */}
                     {pluginsSearchQuery &&
@@ -806,10 +1012,7 @@ export function PreLaunchCard({
                        if (plugin.name.toLowerCase().includes(query)) return true;
                        const pluginSkills = pluginSkillsMap.get(plugin.name) ?? [];
                        return pluginSkills.some((skill) => skill.name.toLowerCase().includes(query));
-                     }).length === 0 &&
-                     standaloneSkills.filter((skill) =>
-                       skill.name.toLowerCase().includes(pluginsSearchQuery.toLowerCase())
-                     ).length === 0 && (
+                     }).length === 0 && (
                       <div className="px-3 py-2 text-center text-xs text-maestro-muted">
                         No results match "{pluginsSearchQuery}"
                       </div>

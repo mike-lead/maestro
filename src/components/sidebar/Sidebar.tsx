@@ -39,6 +39,7 @@ import { usePluginStore } from "@/stores/usePluginStore";
 import { useMarketplaceStore } from "@/stores/useMarketplaceStore";
 import { useWorkspaceStore } from "@/stores/useWorkspaceStore";
 import { useProcessTreeStore, type ProcessInfo, type SessionProcessTree } from "@/stores/useProcessTreeStore";
+import { useUsageStore } from "@/stores/useUsageStore";
 import { GitSettingsModal, RemoteStatusIndicator } from "@/components/git";
 import { QuickActionsManager } from "@/components/quickactions/QuickActionsManager";
 import { MarketplaceBrowser } from "@/components/marketplace";
@@ -46,6 +47,7 @@ import { McpServerEditorModal } from "@/components/mcp";
 import { ClaudeMdEditorModal } from "@/components/claudemd";
 import { CliSettingsModal } from "@/components/terminal/CliSettingsModal";
 import { TerminalSettingsModal } from "@/components/terminal/TerminalSettingsModal";
+import { Tamagotchi } from "@/components/tamagotchi";
 import type { McpCustomServer } from "@/lib/mcp";
 import { checkClaudeMd, type ClaudeMdStatus } from "@/lib/claudemd";
 
@@ -60,7 +62,7 @@ interface SidebarProps {
 
 /* ── Shared card class ── */
 const cardClass =
-  "rounded-lg border border-maestro-border/60 bg-maestro-card p-3 shadow-[0_1px_4px_rgb(0_0_0/0.15),0_0_0_1px_rgb(255_255_255/0.03)_inset] transition-shadow hover:shadow-[0_2px_8px_rgb(0_0_0/0.25),0_0_0_1px_rgb(255_255_255/0.05)_inset]";
+  "sidebar-card-link rounded-lg border border-maestro-border/60 bg-maestro-card p-3 shadow-[0_1px_4px_rgb(0_0_0/0.15),0_0_0_1px_rgb(255_255_255/0.03)_inset] transition-shadow hover:shadow-[0_2px_8px_rgb(0_0_0/0.25),0_0_0_1px_rgb(255_255_255/0.05)_inset]";
 
 const divider = <div className="h-px bg-maestro-border/30 my-1" />;
 
@@ -221,6 +223,9 @@ export function Sidebar({ collapsed, onCollapse, theme, onToggleTheme }: Sidebar
           <ProcessesTab />
         )}
       </div>
+
+      {/* Tamagotchi widget - fixed footer */}
+      {!collapsed && <Tamagotchi />}
 
       {/* Drag handle */}
       {!collapsed && (
@@ -417,7 +422,7 @@ function GitRepositorySection() {
       </div>
 
       {showSettings && (
-        <GitSettingsModal repoPath={repoPath} onClose={() => setShowSettings(false)} />
+        <GitSettingsModal repoPath={repoPath} tabId={activeTab?.id ?? ""} onClose={() => setShowSettings(false)} />
       )}
     </>
   );
@@ -1348,6 +1353,7 @@ function AppearanceSection({
   const isDark = theme !== "light";
   const [showTerminalSettings, setShowTerminalSettings] = useState(false);
   const [showCliSettings, setShowCliSettings] = useState(false);
+  const { showCharacter, toggleCharacter } = useUsageStore();
 
   return (
     <>
@@ -1367,6 +1373,14 @@ function AppearanceSection({
             <Moon size={14} className="text-maestro-accent" />
           )}
           <span>{isDark ? "Switch to Light" : "Switch to Dark"}</span>
+        </button>
+        <button
+          type="button"
+          onClick={toggleCharacter}
+          className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-xs text-maestro-text transition-colors hover:bg-maestro-border/40"
+        >
+          <Bot size={14} className={showCharacter ? "text-maestro-accent" : "text-maestro-muted"} />
+          <span>{showCharacter ? "Hide Tamagotchi" : "Show Tamagotchi"}</span>
         </button>
         <button
           type="button"

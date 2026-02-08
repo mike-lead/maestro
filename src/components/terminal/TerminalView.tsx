@@ -1,4 +1,6 @@
+import { CanvasAddon } from "@xterm/addon-canvas";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
@@ -32,6 +34,9 @@ interface TerminalViewProps {
   isActive?: boolean;
   onFocus?: () => void;
   onKill: (sessionId: number) => void;
+  terminalCount?: number;
+  isZoomed?: boolean;
+  onToggleZoom?: () => void;
 }
 
 /** Map backend AiMode to frontend AIProvider */
@@ -106,6 +111,9 @@ export const TerminalView = memo(function TerminalView({
   isActive = true,
   onFocus,
   onKill,
+  terminalCount = 1,
+  isZoomed = false,
+  onToggleZoom,
 }: TerminalViewProps) {
   const sessionData = useSessionStore(
     useShallow((s) => {
@@ -248,6 +256,42 @@ export const TerminalView = memo(function TerminalView({
     let term: Terminal | null = null;
     let fitAddon: FitAddon | null = null;
     let unlisten: (() => void) | null = null;
+    // === PTY Output Batching (reduces xterm.js render overhead) ===
+    let writeBuffer: string[] = [];
+    let rafId: number | null = null;
+    let fallbackTimerId: ReturnType<typeof setTimeout> | null = null;
+
+    const MAX_BUFFER_CHUNKS = 100;  // Force flush at ~400KB (100 × 4KB chunks)
+    const FALLBACK_FLUSH_MS = 50;   // 20fps floor for backgrounded tabs
+
+    const cancelPendingFlush = () => {
+      if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+      if (fallbackTimerId !== null) { clearTimeout(fallbackTimerId); fallbackTimerId = null; }
+    };
+
+    const flushBuffer = () => {
+      cancelPendingFlush();
+      if (disposed || !term || writeBuffer.length === 0) {
+        writeBuffer = [];
+        return;
+      }
+      const data = writeBuffer.join('');
+      writeBuffer = [];  // Clear BEFORE write to prevent duplicates on error
+      try {
+        term.write(data);
+      } catch (e) {
+        console.error('[TerminalView] write error:', e);
+      }
+    };
+
+    const scheduleFlush = () => {
+      if (rafId !== null) return;  // Already scheduled
+      rafId = requestAnimationFrame(flushBuffer);
+      if (fallbackTimerId === null) {
+        fallbackTimerId = setTimeout(flushBuffer, FALLBACK_FLUSH_MS);
+      }
+    };
+
     let dataDisposable: { dispose: () => void } | null = null;
     let resizeDisposable: { dispose: () => void } | null = null;
     let resizeObserver: ResizeObserver | null = null;
@@ -279,6 +323,24 @@ export const TerminalView = memo(function TerminalView({
       term.loadAddon(fitAddon);
       term.loadAddon(webLinksAddon);
       term.open(container);
+
+      // GPU-accelerated rendering (must be loaded after open())
+      // Try WebGL first, fall back to Canvas2D (much faster than DOM on Linux)
+      try {
+        const webglAddon = new WebglAddon();
+        webglAddon.onContextLoss(() => {
+          webglAddon.dispose();
+          try {
+            term?.loadAddon(new CanvasAddon());
+          } catch { /* DOM renderer as final fallback */ }
+        });
+        term.loadAddon(webglAddon);
+      } catch {
+        // WebGL not available — use Canvas2D renderer
+        try {
+          term.loadAddon(new CanvasAddon());
+        } catch { /* DOM renderer as final fallback */ }
+      }
 
       termRef.current = term;
       fitAddonRef.current = fitAddon;
@@ -316,12 +378,34 @@ export const TerminalView = memo(function TerminalView({
           return false; // Don't send to PTY
         }
 
+        // Cmd+Left/Right (Mac): jump to beginning/end of line
+        // Cmd+Delete (Mac): delete from cursor to beginning of line
+        // WebView intercepts Cmd+key by default, so we manually send the escape sequences
+        if (event.metaKey && event.type === "keydown") {
+          if (event.key === "ArrowLeft") {
+            writeStdin(sessionId, "\x01").catch(console.error); // Ctrl+A: beginning of line
+            return false;
+          }
+          if (event.key === "ArrowRight") {
+            writeStdin(sessionId, "\x05").catch(console.error); // Ctrl+E: end of line
+            return false;
+          }
+          if (event.key === "Backspace") {
+            writeStdin(sessionId, "\x15").catch(console.error); // Ctrl+U: delete to beginning of line
+            return false;
+          }
+        }
+
         return true; // Let xterm handle all other keys
       });
 
       const listenerReady = onPtyOutput(sessionId, (data) => {
-        if (!disposed && term) {
-          term.write(data);
+        if (disposed || !term) return;
+        writeBuffer.push(data);
+        if (writeBuffer.length >= MAX_BUFFER_CHUNKS) {
+          flushBuffer();  // Backpressure: immediate flush if buffer full
+        } else {
+          scheduleFlush();
         }
       });
       listenerReady
@@ -363,6 +447,12 @@ export const TerminalView = memo(function TerminalView({
 
     return () => {
       disposed = true;
+      cancelPendingFlush();
+      // Flush remaining buffered output before disposal
+      if (term && writeBuffer.length > 0) {
+        try { term.write(writeBuffer.join('')); } catch { /* ignore errors during cleanup */ }
+      }
+      writeBuffer = [];
       resizeObserver?.disconnect();
       dataDisposable?.dispose();
       resizeDisposable?.dispose();
@@ -396,6 +486,9 @@ export const TerminalView = memo(function TerminalView({
         branchName={effectiveBranch}
         isWorktree={isWorktree}
         onKill={handleKill}
+        terminalCount={terminalCount}
+        isZoomed={isZoomed}
+        onToggleZoom={onToggleZoom}
       />
 
       {/* xterm.js container */}

@@ -10,6 +10,7 @@ interface MultiProjectViewProps {
 export interface MultiProjectViewHandle {
   addSessionToActiveProject: () => void;
   launchAllInActiveProject: () => Promise<void>;
+  refreshBranchesInActiveProject: () => void;
 }
 
 /**
@@ -24,6 +25,7 @@ export const MultiProjectView = forwardRef<MultiProjectViewHandle, MultiProjectV
   function MultiProjectView({ onSessionCountChange }, ref) {
   const tabs = useWorkspaceStore((s) => s.tabs);
   const setSessionsLaunched = useWorkspaceStore((s) => s.setSessionsLaunched);
+  const setSelectedRepo = useWorkspaceStore((s) => s.setSelectedRepo);
   const gridRefs = useRef<Map<string, TerminalGridHandle>>(new Map());
 
   // Expose methods to parent
@@ -40,6 +42,13 @@ export const MultiProjectView = forwardRef<MultiProjectViewHandle, MultiProjectV
       if (activeTab) {
         const gridRef = gridRefs.current.get(activeTab.id);
         await gridRef?.launchAll();
+      }
+    },
+    refreshBranchesInActiveProject: () => {
+      const activeTab = tabs.find((t) => t.active);
+      if (activeTab) {
+        const gridRef = gridRefs.current.get(activeTab.id);
+        gridRef?.refreshBranches();
       }
     },
   }), [tabs]);
@@ -66,6 +75,28 @@ export const MultiProjectView = forwardRef<MultiProjectViewHandle, MultiProjectV
     }
     return callbacks;
   }, [tabs, setSessionsLaunched]);
+
+  // Stable all-sessions-closed callbacks per tab
+  const allSessionsClosedCallbacks = useMemo(() => {
+    const callbacks = new Map<string, () => void>();
+    for (const tab of tabs) {
+      callbacks.set(tab.id, () => {
+        setSessionsLaunched(tab.id, false);
+      });
+    }
+    return callbacks;
+  }, [tabs, setSessionsLaunched]);
+
+  // Stable repo change callbacks per tab
+  const repoChangeCallbacks = useMemo(() => {
+    const callbacks = new Map<string, (path: string) => void>();
+    for (const tab of tabs) {
+      callbacks.set(tab.id, (path: string) => {
+        setSelectedRepo(tab.id, path);
+      });
+    }
+    return callbacks;
+  }, [tabs, setSelectedRepo]);
 
   // Stable ref setters per tab
   const gridRefSetters = useMemo(() => {
@@ -114,9 +145,14 @@ export const MultiProjectView = forwardRef<MultiProjectViewHandle, MultiProjectV
               ref={gridRefSetters.get(tab.id)}
               tabId={tab.id}
               projectPath={tab.projectPath}
+              repoPath={tab.selectedRepoPath ?? undefined}
+              repositories={tab.repositories}
+              workspaceType={tab.workspaceType}
+              onRepoChange={repoChangeCallbacks.get(tab.id)}
               preserveOnHide={true}
               isActive={tab.active}
               onSessionCountChange={sessionCountChangeCallbacks.get(tab.id)}
+              onAllSessionsClosed={allSessionsClosedCallbacks.get(tab.id)}
             />
           ) : (
             <IdleLandingView onAdd={launchCallbacks.get(tab.id)!} />

@@ -8,6 +8,7 @@ import { useSessionStore } from "@/stores/useSessionStore";
 import { useWorkspaceStore } from "@/stores/useWorkspaceStore";
 import { useGitStore } from "./stores/useGitStore";
 import { useTerminalSettingsStore } from "./stores/useTerminalSettingsStore";
+import { useSwipeNavigation } from "./hooks/useSwipeNavigation";
 import { GitGraphPanel } from "./components/git/GitGraphPanel";
 import { BottomBar } from "./components/shared/BottomBar";
 import { FDADialog } from "./components/shared/FDADialog";
@@ -106,6 +107,25 @@ function App() {
   const activeTab = tabs.find((tab) => tab.active) ?? null;
   const activeProjectPath = activeTab?.projectPath;
 
+  // Trackpad two-finger horizontal swipe to switch project tabs
+  const switchToNextTab = useCallback(() => {
+    const idx = tabs.findIndex((t) => t.active);
+    const next = tabs[(idx + 1) % tabs.length];
+    if (next) selectTab(next.id);
+  }, [tabs, selectTab]);
+
+  const switchToPrevTab = useCallback(() => {
+    const idx = tabs.findIndex((t) => t.active);
+    const prev = tabs[(idx - 1 + tabs.length) % tabs.length];
+    if (prev) selectTab(prev.id);
+  }, [tabs, selectTab]);
+
+  useSwipeNavigation({
+    onSwipeLeft: switchToNextTab,
+    onSwipeRight: switchToPrevTab,
+    enabled: tabs.length >= 2,
+  });
+
   // Git store for commit count and refresh
   const { commits, fetchCommits } = useGitStore();
   const [isRefreshingGit, setIsRefreshingGit] = useState(false);
@@ -195,7 +215,10 @@ function App() {
               onToggleGitPanel={() => setGitPanelOpen((prev) => !prev)}
               gitPanelOpen={gitPanelOpen}
               hideWindowControls
-              onBranchChanged={(newBranch) => setCurrentBranch(newBranch)}
+              onBranchChanged={(newBranch) => {
+                setCurrentBranch(newBranch);
+                multiProjectRef.current?.refreshBranchesInActiveProject();
+              }}
             />
 
             {/* Git panel header - inline at same level as TopBar */}
