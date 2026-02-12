@@ -233,6 +233,9 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
     return idx >= 0 ? idx : null;
   }, [focusedSlotId, launchedSlots]);
 
+  // Ref-based close callback to avoid forward-reference issues with handleKill/removeSlot
+  const closePaneRef = useRef<() => void>(() => {});
+
   /**
    * Splits the focused terminal pane in the given direction.
    * Creates a new pre-launch slot and inserts it as a sibling.
@@ -278,6 +281,7 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
     }, [launchedSlots, focusedIndex]),
     onSplitVertical: useCallback(() => handleSplit("vertical"), [handleSplit]),
     onSplitHorizontal: useCallback(() => handleSplit("horizontal"), [handleSplit]),
+    onClosePane: closePaneRef.current,
   });
 
   // Sync refs with state and report counts to parent
@@ -742,6 +746,20 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
 
     setSlots((prev) => prev.filter((s) => s.id !== slotId));
   }, [focusedSlotId, layoutTree]);
+
+  // Keep closePaneRef in sync with latest handleKill/removeSlot
+  closePaneRef.current = () => {
+    const targetId = focusedSlotId ?? slotsRef.current[0]?.id;
+    if (!targetId) return;
+    if (slotsRef.current.length <= 1) return; // don't close the last pane
+    const slot = slotsRef.current.find((s) => s.id === targetId);
+    if (!slot) return;
+    if (slot.sessionId !== null) {
+      handleKill(slot.sessionId);
+    } else {
+      removeSlot(slot.id);
+    }
+  };
 
   /**
    * Updates the AI mode for a slot.

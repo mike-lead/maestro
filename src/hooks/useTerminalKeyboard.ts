@@ -15,6 +15,8 @@ interface UseTerminalKeyboardOptions {
   onSplitVertical?: () => void;
   /** Callback to split the focused terminal horizontally (Cmd+Shift+D) */
   onSplitHorizontal?: () => void;
+  /** Callback to close the focused pane (Cmd+W) */
+  onClosePane?: () => void;
 }
 
 /**
@@ -40,6 +42,7 @@ export function useTerminalKeyboard({
   onCyclePrevious,
   onSplitVertical,
   onSplitHorizontal,
+  onClosePane,
 }: UseTerminalKeyboardOptions): void {
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -56,6 +59,14 @@ export function useTerminalKeyboard({
         } else {
           onSplitVertical?.();
         }
+        return;
+      }
+
+      // Cmd/Ctrl+W: close the focused pane
+      if (event.key === "w" && !event.altKey && !event.shiftKey) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        onClosePane?.();
         return;
       }
 
@@ -101,5 +112,5 @@ export function useTerminalKeyboard({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [terminalCount, focusedIndex, onFocusTerminal, onCycleNext, onCyclePrevious, onSplitVertical, onSplitHorizontal]);
+  }, [terminalCount, focusedIndex, onFocusTerminal, onCycleNext, onCyclePrevious, onSplitVertical, onSplitHorizontal, onClosePane]);
 }

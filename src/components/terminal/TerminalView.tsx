@@ -442,6 +442,11 @@ export const TerminalView = memo(function TerminalView({
           return false;
         }
 
+        // Cmd/Ctrl+W: close pane — block xterm so 'w' isn't sent to PTY.
+        if (event.key === "w" && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.type === "keydown") {
+          return false;
+        }
+
         // Cmd+K (Mac) or Ctrl+K (Linux/Windows): clear terminal scrollback + viewport
         if (event.key === "k" && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.type === "keydown") {
           term?.clear();
